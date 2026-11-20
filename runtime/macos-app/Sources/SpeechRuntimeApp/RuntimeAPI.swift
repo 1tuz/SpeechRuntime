@@ -18,22 +18,6 @@ actor RuntimeAPI {
     func health() async throws -> RuntimeSnapshot {
         try JSONDecoder().decode(RuntimeSnapshot.self, from: await send("/health", authenticated: false))
     }
-    func load() async throws {
-        do {
-            _ = try await send("/v1/models/load", body: ["model": ModelSpec.id, "backend": "ane"], timeout: 180)
-        } catch let error as URLError where [.timedOut, .networkConnectionLost].contains(error.code) {
-            // The existing server has a connection deadline. A cold ANE compile can
-            // outlive it even though the worker still finishes loading. Observe
-            // readiness; do not enqueue duplicate loads or silently switch to GPU.
-            let deadline = ProcessInfo.processInfo.systemUptime + 150
-            while ProcessInfo.processInfo.systemUptime < deadline {
-                try Task.checkCancellation()
-                if let status = try? await health(), status.modelLoaded { return }
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-            throw error
-        }
-    }
     private func send(_ path: String, body: [String: String]? = nil,
                       authenticated: Bool = true, timeout: TimeInterval = 8) async throws -> Data {
         var request = URLRequest(url: Self.endpoint.appendingPathComponent(String(path.dropFirst())))

@@ -55,6 +55,19 @@ public final class HTTPServer: @unchecked Sendable {
         static let headerCount = 100
         static let bodyBytes = 256 * 1024 * 1024
         static let requestTimeout: TimeInterval = 30
+
+        static func asrResponseTimeout(_ request: HTTPRequest) -> TimeInterval? {
+            switch (request.method, request.path) {
+            case ("POST", "/v1/models/load"):
+                return WorkerClient.unloadTimeout + WorkerClient.loadTimeout + 5
+            case ("POST", "/v1/streams"):
+                return WorkerClient.unloadTimeout + WorkerClient.loadTimeout + WorkerClient.openTimeout + 5
+            case ("POST", "/v1/audio/transcriptions"):
+                return WorkerClient.transcribeBudget + 5
+            default:
+                return nil
+            }
+        }
     }
 
     public func start() {
@@ -63,10 +76,10 @@ public final class HTTPServer: @unchecked Sendable {
             connection.start(queue: self.queue)
             // A client that opened a socket and stalled would otherwise pin the connection (and
             // its buffer) until the peer goes away. `cancel` on a finished connection is a no-op.
-            self.queue.asyncAfter(deadline: .now() + Limits.requestTimeout) {
-                connection.cancel()
-            }
-            self.receive(on: connection, buffer: Data())
+            let uploadDeadline = DispatchTime.now() + Limits.requestTimeout
+            let timeout = DispatchWorkItem { connection.cancel() }
+            self.queue.asyncAfter(deadline: uploadDeadline, execute: timeout)
+            self.receive(on: connection, buffer: Data(), deadline: uploadDeadline, timeout: timeout)
         }
         listener.start(queue: queue)
     }
@@ -75,23 +88,34 @@ public final class HTTPServer: @unchecked Sendable {
         listener.cancel()
     }
 
-    private func receive(on connection: NWConnection, buffer: Data) {
+    private func receive(on connection: NWConnection, buffer: Data, deadline: DispatchTime, timeout: DispatchWorkItem) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            guard DispatchTime.now() < deadline else { connection.cancel(); return }
             var buffer = buffer
             if let data { buffer.append(data) }
 
             switch Self.parse(buffer) {
             case .ready(let parsed) where parsed.request.body.count >= parsed.contentLength:
                 let request = parsed.request
+                let responseTimeout: DispatchWorkItem
+                if let seconds = Limits.asrResponseTimeout(request) {
+                    guard DispatchTime.now() < deadline else { connection.cancel(); return }
+                    timeout.cancel()
+                    responseTimeout = DispatchWorkItem { connection.cancel() }
+                    self.queue.asyncAfter(deadline: .now() + seconds, execute: responseTimeout)
+                } else {
+                    responseTimeout = timeout
+                }
                 Task {
                     let response = await self.handler(request)
-                    self.write(response, to: connection)
+                    self.write(response, to: connection, timeout: responseTimeout)
                 }
                 return
+
             case .rejected(let failure):
                 // Reject before the body arrives: an oversized or malformed declaration is enough.
-                self.write(.error(failure.message, status: failure.status), to: connection)
+                self.write(.error(failure.message, status: failure.status), to: connection, timeout: timeout)
                 return
             default:
                 break
@@ -100,11 +124,11 @@ public final class HTTPServer: @unchecked Sendable {
                 connection.cancel()
                 return
             }
-            self.receive(on: connection, buffer: buffer)
+            self.receive(on: connection, buffer: buffer, deadline: deadline, timeout: timeout)
         }
     }
 
-    private func write(_ response: HTTPResponse, to connection: NWConnection) {
+    private func write(_ response: HTTPResponse, to connection: NWConnection, timeout: DispatchWorkItem) {
         var head = "HTTP/1.1 \(response.status) \(Self.reason(response.status))\r\n"
         head += "Content-Length: \(response.body.count)\r\n"
         head += "Connection: close\r\n"
@@ -115,6 +139,7 @@ public final class HTTPServer: @unchecked Sendable {
         var data = Data(head.utf8)
         data.append(response.body)
         connection.send(content: data, completion: .contentProcessed { _ in
+            timeout.cancel()
             connection.cancel()
         })
     }

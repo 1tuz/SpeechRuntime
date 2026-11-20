@@ -8,7 +8,7 @@ import ServiceManagement
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum Phase: String { case off, downloading, preparing, starting, idle, ready, listening, processing, stopping, error }
+    enum Phase: String { case off, downloading, preparing, starting, idle, loading, ready, listening, processing, stopping, error }
     @Published private(set) var phase: Phase = .off
     @Published private(set) var running = false
     @Published private(set) var busy = false
@@ -168,7 +168,7 @@ final class AppModel: ObservableObject {
             snapshot = status; running = true
             if !status.hasWorker { phase = .error; failure = L("error.worker"); return }
             failure = nil
-            phase = status.processing ? .processing : (sessions > 0 ? .listening : (status.modelLoaded ? .ready : .idle))
+            phase = status.processing ? .processing : (sessions > 0 ? .listening : (status.modelLoading ? .loading : (status.modelLoaded ? .ready : .idle)))
             if panelVisible { updateMetrics(status) }
         } catch {
             running = true; phase = .error; failure = error.localizedDescription
@@ -238,7 +238,6 @@ final class AppModel: ObservableObject {
                     try await Task.sleep(nanoseconds: 250_000_000)
                 }
                 guard ready else { throw AppFailure(L("error.ready")) }
-                try await api.load()
                 busy = false; operation = nil
                 await refresh()
             } catch {

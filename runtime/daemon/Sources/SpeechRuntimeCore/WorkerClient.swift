@@ -34,6 +34,30 @@ public actor WorkerClient {
     /// True while the daemon itself is shutting the worker down: an intentional stop must never
     /// trigger the crash-restart path.
     private var intentionalStop = false
+    private var lastStopGeneration = 0
+
+    struct WorkerLoss: Error, CustomStringConvertible {
+        let generation: Int
+        let description: String
+    }
+
+    private struct Resident {
+        let device: Any
+        var lastUse: ContinuousClock.Instant
+    }
+    private var residents: [String: Resident] = [:]
+    private var loads: [String: Task<[String: Any], Error>] = [:]
+    private var unloads: [String: Task<[String: Any], Error>] = [:]
+    // A timeout stops waiting, not the worker mutation. Keep its slot until the wire reply.
+    private var mutations: Set<String> = []
+    private var mutationModels: [UInt64: (model: String, loading: Bool)] = [:]
+    private var modelUses: [String: Int] = [:]
+
+    static let loadTimeout: TimeInterval = 180
+    static let unloadTimeout: TimeInterval = 30
+    static let transcribeTimeout: TimeInterval = 300
+    static let openTimeout: TimeInterval = 10
+    static let transcribeBudget: TimeInterval = 565
 
     public init(workerPath: String, log: @escaping @Sendable (String) -> Void) {
         self.workerPath = workerPath
@@ -66,7 +90,6 @@ public actor WorkerClient {
     public func start() throws {
         guard process == nil else { return }
         intentionalStop = false
-        generation += 1
         let child = Process()
         child.executableURL = URL(fileURLWithPath: workerPath)
         let inPipe = Pipe()
@@ -76,6 +99,9 @@ public actor WorkerClient {
         child.standardOutput = outPipe
         child.standardError = errPipe
         try child.run()
+        generation += 1
+        let startedGeneration = generation
+        _ = fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         process = child
         stdinPipe = inPipe
         startedAt = Date()
@@ -115,9 +141,9 @@ public actor WorkerClient {
         reader = Task { [weak self] in
             for await line in lines {
                 guard let self else { return }
-                await self.handle(line: line)
+                await self.handle(line: line, generation: startedGeneration)
             }
-            await self?.workerExited()
+            await self?.workerExited(generation: startedGeneration)
         }
         stderrReader = Task { [weak self] in
             guard let self else { return }
@@ -156,11 +182,13 @@ public actor WorkerClient {
     /// Intentional shutdown: kills the child without ever arming the crash-restart path.
     public func stop() {
         intentionalStop = true
+        lastStopGeneration = generation
         reader?.cancel()
         stderrReader?.cancel()
         let previous = process
         process = nil
         stdinPipe = nil
+        clearReadiness()
         let code = Self.exitStatus(of: previous)
         log("worker stopped intentionally (status \(code.map(String.init) ?? "unreaped"))")
         failPending("worker stopped")
@@ -169,7 +197,30 @@ public actor WorkerClient {
     // MARK: - Protocol
 
     public func request(_ payload: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
-        guard let stdinPipe, process?.isRunning == true else {
+        try await request(payload, timeout: timeout, generation: nil)
+    }
+
+    private func liveGeneration() throws -> Int {
+        if let process, !process.isRunning { workerExited(generation: generation) }
+        guard process != nil else { throw RuntimeError.message("worker is not running") }
+        return generation
+    }
+
+    private func requireGeneration(_ expected: Int) throws {
+        guard try liveGeneration() == expected else {
+            throw WorkerLoss(generation: expected, description: "worker restarted")
+        }
+    }
+
+    private func request(
+        _ payload: [String: Any], timeout: TimeInterval, generation expected: Int?, mutation: String? = nil
+    ) async throws -> [String: Any] {
+        try Task.checkCancellation()
+        let current = try liveGeneration()
+        if let expected, current != expected {
+            throw WorkerLoss(generation: expected, description: "worker restarted")
+        }
+        guard let stdinPipe else {
             throw RuntimeError.message("worker is not running")
         }
         let id = nextID
@@ -196,7 +247,22 @@ public actor WorkerClient {
                     continuation.resume(throwing: CancellationError())
                     return
                 }
-                stdinPipe.fileHandleForWriting.write(bytes)
+                do {
+                    try stdinPipe.fileHandleForWriting.write(contentsOf: bytes)
+                } catch {
+                    let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError ?? (error as NSError)
+                    if process?.isRunning == false || (underlying.domain == NSPOSIXErrorDomain && underlying.code == Int(EPIPE)) {
+                        workerExited(generation: current)
+                    } else {
+                        _ = opNames.take(id)
+                        pending.take(id)?.resume(throwing: error)
+                    }
+                    return
+                }
+                if let mutation {
+                    mutations.insert(mutation)
+                    mutationModels[id] = (mutation, op == "load")
+                }
                 let timer = CancelableTimeout(nanoseconds: UInt64(max(timeout, 0) * 1_000_000_000)) { [weak self] in
                     guard let self else { return }
                     Task { await self.fireTimeout(id: id, seconds: timeout) }
@@ -230,13 +296,82 @@ public actor WorkerClient {
     }
 
     public func load(model: String, path: String, backend: String? = nil) async throws -> [String: Any] {
+        let generation = try liveGeneration()
+        return try await usingModel(model, generation: generation) {
+            try await ready(model: model, path: path, backend: backend, generation: generation)
+        }
+    }
+
+    func loadingModels() -> Set<String> {
+        guard process?.isRunning == true else { return [] }
+        return Set(loads.keys).union(mutationModels.values.lazy.filter(\.loading).map(\.model))
+    }
+
+    private func usingModel<T>(_ model: String, generation: Int, _ body: () async throws -> T) async throws -> T {
+        modelUses[model, default: 0] += 1
+        defer {
+            if self.generation == generation, let uses = modelUses[model] {
+                modelUses[model] = uses == 1 ? nil : uses - 1
+                residents[model]?.lastUse = .now
+            }
+        }
+        return try await body()
+    }
+
+    private func ready(model: String, path: String, backend: String?, generation: Int) async throws -> [String: Any] {
+        if let unload = unloads[model] {
+            // A rejected unload leaves the model resident; a successful one makes it cold.
+            _ = try? await unload.value
+            try requireGeneration(generation)
+        }
+        try Task.checkCancellation()
+        if let load = loads[model] { return try await load.value }
+        guard !mutations.contains(model) else { throw RuntimeError.message("model \(model) mutation still pending") }
+        if let resident = residents[model] {
+            return ["model": model, "device": resident.device, "cached": true]
+        }
         var payload: [String: Any] = ["op": "load", "model": model, "path": path]
         if let backend { payload["backend"] = backend }
-        return try await request(payload, timeout: 180)
+        let flight = Task {
+            defer { if self.generation == generation { loads[model] = nil } }
+            let result = try await request(payload, timeout: Self.loadTimeout, generation: generation, mutation: model)
+            try requireGeneration(generation)
+            return result
+        }
+        loads[model] = flight
+        return try await flight.value
     }
 
     public func unload(model: String) async throws -> [String: Any] {
-        try await request(["op": "unload", "model": model], timeout: 30)
+        let generation = try liveGeneration()
+        if let unload = unloads[model] { return try await unload.value }
+        guard modelUses[model] == nil, !mutations.contains(model) else {
+            throw RuntimeError.message("model \(String(reflecting: model)) is in use")
+        }
+        let flight = Task {
+            defer { if self.generation == generation { unloads[model] = nil } }
+            return try await request(["op": "unload", "model": model], timeout: Self.unloadTimeout,
+                                     generation: generation, mutation: model)
+        }
+        unloads[model] = flight
+        return try await flight.value
+    }
+
+    package func unloadIdleModels(after seconds: Int, keeping busy: Set<String>) async {
+        for model in Array(residents.keys) {
+            guard !Task.isCancelled else { return }
+            guard !busy.contains(model), modelUses[model] == nil, unloads[model] == nil,
+                  !mutations.contains(model), let resident = residents[model],
+                  resident.lastUse.duration(to: .now) >= .seconds(seconds) else { continue }
+            let generation = self.generation
+            do {
+                _ = try await unload(model: model)
+                log("unloaded idle model \(model) after \(seconds) s")
+            } catch {
+                if self.generation == generation { residents[model]?.lastUse = .now }
+                log("idle unload of \(model) failed, will retry: \(error)")
+            }
+        }
     }
 
     public func transcribe(
@@ -247,6 +382,39 @@ public actor WorkerClient {
         maxChunkMs: Int? = nil,
         priority: String
     ) async throws -> [String: Any] {
+        try await transcribe(pcm: pcm, model: model, language: language, windowMs: windowMs,
+                             maxChunkMs: maxChunkMs, priority: priority, generation: nil, deadline: nil)
+    }
+
+    func transcribeReady(
+        pcm: [Float], model: String, entry: ModelEntry, language: String?, windowMs: Int?,
+        maxChunkMs: Int?, priority: String
+    ) async throws -> [String: Any] {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(Self.transcribeBudget))
+        let retryReadiness = Duration.seconds(Self.loadTimeout + Self.unloadTimeout)
+        for attempt in 0...1 {
+            let generation = try liveGeneration()
+            do {
+                return try await usingModel(model, generation: generation) {
+                    _ = try await ready(model: model, path: entry.path, backend: entry.backend, generation: generation)
+                    return try await transcribe(pcm: pcm, model: model, language: language, windowMs: windowMs,
+                                                maxChunkMs: maxChunkMs, priority: priority, generation: generation,
+                                                deadline: deadline)
+                }
+            } catch let loss as WorkerLoss where attempt == 0 && priority == "interactive" && loss.generation == generation
+                && generation > lastStopGeneration && self.generation > generation && process?.isRunning == true
+                && ContinuousClock.now.duration(to: deadline) > retryReadiness {
+                try Task.checkCancellation()
+            }
+        }
+        preconditionFailure("the second attempt returns or throws")
+    }
+
+    private func transcribe(
+        pcm: [Float], model: String, language: String?, windowMs: Int?, maxChunkMs: Int?, priority: String,
+        generation: Int?, deadline: ContinuousClock.Instant?
+    ) async throws -> [String: Any] {
+        try Task.checkCancellation()
         var payload: [String: Any] = [
             "op": "transcribe",
             "model": model,
@@ -256,13 +424,33 @@ public actor WorkerClient {
         if let language { payload["language"] = language }
         if let windowMs { payload["window_ms"] = windowMs }
         if let maxChunkMs { payload["max_chunk_ms"] = maxChunkMs }
-        return try await request(payload, timeout: 300)
+        let timeout = deadline.map { min(Self.transcribeTimeout, Double(ContinuousClock.now.duration(to: $0).components.seconds)) }
+            ?? Self.transcribeTimeout
+        guard timeout > 0 else { throw RuntimeError.message("transcription deadline exceeded") }
+        return try await request(payload, timeout: timeout, generation: generation)
     }
 
     public func openSession(id: String, model: String, config: [String: Any]) async throws -> [String: Any] {
+        try await openSession(id: id, model: model, config: config, generation: nil)
+    }
+
+    func openReadySession(id: String, model: String, entry: ModelEntry, config: [String: Any]) async throws
+        -> (result: [String: Any], generation: Int) {
+        let generation = try liveGeneration()
+        return try await usingModel(model, generation: generation) {
+            _ = try await ready(model: model, path: entry.path, backend: entry.backend, generation: generation)
+            let result = try await openSession(id: id, model: model, config: config, generation: generation)
+            try requireGeneration(generation)
+            if sessionBuffers[id] == nil { sessionBuffers[id] = SessionEventBuffer() }
+            return (result, generation)
+        }
+    }
+
+    private func openSession(id: String, model: String, config: [String: Any], generation: Int?) async throws -> [String: Any] {
         // The client may reuse an id that this daemon already forgot; it is a fresh session then.
         retired.revive(id)
-        return try await request(["op": "session_open", "session": id, "model": model, "config": config], timeout: 10)
+        return try await request(["op": "session_open", "session": id, "model": model, "config": config],
+                                 timeout: Self.openTimeout, generation: generation)
     }
 
     public func sessionAudio(id: String, pcm: [Float]) async throws {
@@ -355,7 +543,8 @@ public actor WorkerClient {
         waiters.wake(session: session)
     }
 
-    private func handle(line: String) async {
+    private func handle(line: String, generation: Int) {
+        guard generation == self.generation, process != nil else { return }
         guard let data = line.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = object["type"] as? String
@@ -367,6 +556,17 @@ public actor WorkerClient {
 
         switch type {
         case "ok", "error":
+            if let id = (object["id"] as? NSNumber)?.uint64Value,
+               let (model, loading) = mutationModels.removeValue(forKey: id) {
+                mutations.remove(model)
+                if type == "ok", let result = object["result"] as? [String: Any] {
+                    if loading {
+                        residents[model] = Resident(device: result["device"] ?? NSNull(), lastUse: .now)
+                    } else {
+                        residents[model] = nil
+                    }
+                }
+            }
             guard let id = (object["id"] as? NSNumber)?.uint64Value,
                   let continuation = pending.take(id)
             else {
@@ -407,19 +607,21 @@ public actor WorkerClient {
     /// Crash path: fail in-flight requests, tell every live session its stream is dead (error +
     /// ended), bump the generation and bring a fresh worker up. An intentional `stop()` never
     /// comes through here.
-    private func workerExited() {
+    private func workerExited(generation: Int) {
+        guard generation == self.generation, process != nil, !intentionalStop else { return }
+        reader?.cancel()
+        stderrReader?.cancel()
         let previous = process
         process = nil
         stdinPipe = nil
+        clearReadiness()
         // The pipe closed, so the child is dead or dying; reap it before the reference is dropped
         // (see `exitStatus(of:)`). The exact status is only echoed after it is safe to read.
         let code = Self.exitStatus(of: previous) ?? lastExit ?? -1
-        guard !intentionalStop else {
-            log("worker stopped intentionally (status \(code))")
-            return
-        }
         lastExit = code
-        failPending("worker exited with status \(code)")
+        for id in pending.failAll(WorkerLoss(generation: generation, description: "worker exited with status \(code)")) {
+            _ = opNames.take(id)
+        }
         for (session, buffer) in sessionBuffers where !buffer.ended {
             var dead = buffer
             dead.append(SessionEvent(name: "error", data: ["message": "worker exited with status \(code)"]))
@@ -438,8 +640,17 @@ public actor WorkerClient {
     }
 
 
+    private func clearReadiness() {
+        residents.removeAll()
+        loads.removeAll()
+        unloads.removeAll()
+        mutations.removeAll()
+        mutationModels.removeAll()
+        modelUses.removeAll()
+    }
+
     private func failPending(_ message: String) {
-        pending.failAll(message)
+        for id in pending.failAll(RuntimeError.message(message)) { _ = opNames.take(id) }
     }
 
     public static func encode(_ pcm: [Float]) -> String {
@@ -512,6 +723,10 @@ final class PendingReplies: @unchecked Sendable {
     }
 
     func failAll(_ message: String) {
+        _ = failAll(RuntimeError.message(message))
+    }
+
+    func failAll(_ error: Error) -> [UInt64] {
         lock.lock()
         let waiting = map
         map.removeAll()
@@ -519,8 +734,9 @@ final class PendingReplies: @unchecked Sendable {
         lock.unlock()
         for (_, entry) in waiting {
             entry.timer?.cancel()
-            entry.continuation.resume(throwing: RuntimeError.message(message))
+            entry.continuation.resume(throwing: error)
         }
+        return Array(waiting.keys)
     }
 }
 

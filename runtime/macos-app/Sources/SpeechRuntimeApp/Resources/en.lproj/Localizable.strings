@@ -7,11 +7,13 @@
 "state.starting" = "Starting and warming up";
 "state.idle" = "Service ready, model unloaded";
 "state.ready" = "Ready for your apps";
+"state.loading" = "Loading model for your app";
 "state.listening" = "Receiving audio";
 "state.processing" = "Transcribing";
 "state.stopping" = "Stopping service";
 "state.error" = "Action required";
 "model.loaded" = "LOADED";
+"model.loading" = "LOADING";
 "model.idle" = "ON DEMAND";
 "metric.ane" = "Neural Engine memory";
 "metric.sessions" = "Active sessions";

@@ -6,8 +6,15 @@
 - Handy discovers its bearer token locally at
   `~/Library/Application Support/SpeechRuntime/token`; no manual API key.
 - Runtime binds `127.0.0.1:8477` by default. Never expose it to the LAN.
-- Preflight: `GET /v1/models`, then `POST /v1/models/load` if the
-  Parakeet model is unloaded. A first-time ANE preparation may be slow.
+- On enable, the runtime verifies the pinned artifact, prepares ANE, and starts
+  the LaunchAgent without loading weights. The first ASR operation loads
+  `parakeet-ultra` on demand; clients may send the explicit `/v1/models/load`
+  request on keydown to hide that first-use latency.
+  `loading: true` in model status means that load is in progress.
+  A one-shot client may retry once after an observed worker restart using the
+  same in-memory PCM; do not persist recordings in the daemon and do not fall
+  back to another model. Existing stream clients must reopen after restart;
+  stream recovery does not imply recording recovery.
 - Dictation on key release: raw 16 kHz mono WAV to
   `POST /v1/audio/transcriptions?model=parakeet-ultra&priority=interactive`.
 - File import/history retry: the same endpoint with `priority=batch`.

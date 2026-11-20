@@ -59,6 +59,8 @@ public struct Router: Sendable {
             }
         } catch let error as RuntimeError {
             return .error(error.description, status: 400)
+        } catch let loss as WorkerClient.WorkerLoss {
+            return .error(loss.description, status: 400)
         } catch {
             return .error("\(error)", status: 500)
         }
@@ -89,6 +91,16 @@ public struct Router: Sendable {
         } catch {
             workerState["error"] = "\(error)"
         }
+        let loading = await worker.loadingModels()
+        var rows = workerState["models"] as? [[String: Any]] ?? []
+        for index in rows.indices {
+            rows[index]["loading"] = (rows[index]["model"] as? String).map(loading.contains) ?? false
+        }
+        let listed = Set(rows.compactMap { $0["model"] as? String })
+        for model in loading.subtracting(listed).sorted() where config().models[model] != nil {
+            rows.append(["model": model, "loaded": false, "loading": true])
+        }
+        if workerState["models"] != nil || !rows.isEmpty { workerState["models"] = rows }
         for id in await sessions.sweep(now: Date()) { await idle.streamClosed(id) }
         await worker.cleanup()
         return .json([
@@ -118,6 +130,7 @@ public struct Router: Sendable {
     private func models() async throws -> HTTPResponse {
         let configured = config().models
         let stats = (try? await worker.stats())?["models"] as? [[String: Any]] ?? []
+        let loading = await worker.loadingModels()
         var loadedBy: [String: [String: Any]] = [:]
         for entry in stats {
             if let name = entry["model"] as? String { loadedBy[name] = entry }
@@ -130,6 +143,7 @@ public struct Router: Sendable {
                 "backend": entry.backend ?? "auto",
                 "languages": entry.languages ?? [],
                 "capabilities": Self.capabilities,
+                "loading": loading.contains(name),
             ]
             if let live = loadedBy[name] {
                 row["loaded"] = live["loaded"] ?? false
@@ -174,7 +188,7 @@ public struct Router: Sendable {
     private func transcribe(_ request: HTTPRequest) async throws -> HTTPResponse {
         let model = request.query["model"] ?? ((try? Self.body(request))?["model"] as? String)
         guard let model else { throw RuntimeError.message("query parameter \"model\" is required") }
-        guard config().models[model] != nil else {
+        guard let entry = config().models[model] else {
             throw RuntimeError.message("unknown model \(model)")
         }
         let audio = try Audio.decode(body: request.body, rawFormat: request.headers["x-sample-format"])
@@ -188,10 +202,10 @@ public struct Router: Sendable {
         // interactive requests keep the single-job path.
         let batchChunkMs: Int? = priority == "batch" ? config().batchChunkMs : nil
         let started = Date()
-        await idle.touch(model)
-        let result = try await worker.transcribe(
+        let result = try await worker.transcribeReady(
             pcm: audio.samples,
             model: model,
+            entry: entry,
             language: request.query["language"],
             windowMs: window,
             maxChunkMs: batchChunkMs,
@@ -353,7 +367,7 @@ public struct Router: Sendable {
         guard let model = body["model"] as? String else {
             throw RuntimeError.message("field \"model\" is required")
         }
-        guard config().models[model] != nil else {
+        guard let entry = self.config().models[model] else {
             throw RuntimeError.message("unknown model \(model)")
         }
         var config: [String: Any] = [:]
@@ -363,8 +377,7 @@ public struct Router: Sendable {
         // worker in every final/cancelled/error event of this session.
         if let source = body["source"] as? String { config["source"] = source }
         let id = UUID().uuidString
-        let result = try await worker.openSession(id: id, model: model, config: config)
-        let generation = await worker.generation
+        let (result, generation) = try await worker.openReadySession(id: id, model: model, entry: entry, config: config)
         await sessions.insert(id, model: model, config: config, generation: generation)
         await idle.streamOpened(id, model: model, generation: generation)
         return .json(["stream": id, "model": model, "result": result])

@@ -56,13 +56,13 @@ can be rejected by system approval policy. The UI displays errors instead of pre
 
 | Action | Effect |
 |---|---|
-| Turn on | Verify/download model, prepare ANE, bootstrap the user LaunchAgent, warm Parakeet |
+| Turn on | Verify/download model, prepare ANE, bootstrap the user LaunchAgent; the model stays unloaded until an ASR operation requests it |
 | Turn off | Confirm when sessions/work are active, boot out this app's agent, wait for owned processes to exit |
 | Close panel | No change to service; fast resource sampling stops |
 | Quit interface | Leave service and other clients running |
 | Open at login ON | macOS opens the interface at the next login; it restores the last explicit service On/Off state |
 | Open at login OFF | No automatic startup next login; the current service is left alone |
-| Worker crash | Existing daemon supervision handles it; clients must reopen sessions and load their model again |
+| Worker crash | Existing daemon supervision handles it; clients must reopen sessions and request their model again |
 
 The agent plist is **not** installed in `~/Library/LaunchAgents`; it lives in Application Support
 and is bootstrapped into `gui/<uid>` for this login session. This is deliberate: a permanently
@@ -93,9 +93,10 @@ Speech Runtime.app/Contents/MacOS/
 ```
 
 ANE's compiled cache remains owned by wavo in `~/Library/Caches/wavo/`.
-The first load in a different executable can still require system compilation. The UI waits for
-readiness and handles a lost cold-load HTTP response without creating another model instance.
-No automatic fallback to GPU or GigaAM is performed.
+The first ASR operation after startup or idle unload can load the model on demand;
+the panel reports that loading state separately from idle and ready. A client may
+explicitly call `/v1/models/load` before sending audio, but no automatic GPU or
+GigaAM fallback is performed.
 
 To update, turn the service off and quit the interface, then run the installer again. Model files,
 preferences, and the API token remain outside the bundle and are preserved. To uninstall, turn off
@@ -107,17 +108,19 @@ manual so uninstalling the UI never silently deletes recordings or unrelated dev
 The existing loopback API remains at `http://127.0.0.1:8477`. The app refuses to adopt or kill a
 manually started development daemon on that port. Stop that daemon before enabling the packaged one.
 
-Each independent client uses the **same** token and daemon, but owns its own session:
+Each independent client uses the **same** token and daemon, but owns its own session.
 
-1. `POST /v1/models/load` with `{"model":"parakeet-ultra","backend":"ane"}`.
+1. Request or rely on on-demand loading: `POST /v1/models/load` with
+   `{"model":"parakeet-ultra","backend":"ane"}` is optional for one-shot clients.
 2. `POST /v1/streams` with `{"model":"parakeet-ultra"}`.
 3. Send mono 16 kHz PCM to `/v1/streams/audio`, specifying `X-Sample-Format`.
 4. Poll `/v1/streams/events` with the returned cursor.
 5. End or cancel only the client's own session.
 
 Loading is cached by the existing worker; it does not start one ASR process per application.
-The current daemon does not auto-load a model on `open_stream`: clients must perform step 1 after
-idle unload or a worker restart. This patch does not misrepresent that behavior as automatic recovery.
+One-shot clients may retry once after an observed worker restart with the same in-memory PCM.
+Stream clients must reopen after restart and must not assume their recording is recoverable.
+Clients must preserve audio they could not submit and must not substitute another model.
 The existing Swift `RuntimeClient` can be used; the included `examples/two_clients.py` is a bounded
 transport smoke with two half-second silent streams, not a transcription benchmark.
 

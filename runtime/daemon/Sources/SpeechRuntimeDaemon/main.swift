@@ -95,33 +95,11 @@ struct Daemon {
             logger("listening on http://127.0.0.1:\(port) token-file=\(tokenPath)")
 
             let monitor = Task {
-                var lastGeneration = await worker.generation
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
                     let generation = await worker.generation
-                    if generation != lastGeneration {
-                        await idle.pruneStreams(before: generation)
-                        lastGeneration = generation
-                    }
-                    let stats = try? await worker.stats()
-                    let loaded = (stats?["models"] as? [[String: Any]] ?? []).filter {
-                        ($0["loaded"] as? Bool) == true
-                    }.compactMap { $0["model"] as? String }
-                    let idleModels = await idle.modelsToUnload(idle: TimeInterval(idleSeconds)) { model in
-                        loaded.contains(model)
-                    }
-                    for model in idleModels {
-                        do {
-                            _ = try await worker.unload(model: model)
-                            await idle.didUnload(model)
-                            logger("unloaded idle model \(model) after \(idleSeconds) s")
-                        } catch {
-                            // "in use" means a session or queued/running job still needs the model:
-                            // keep tracking it and retry after the idle window elapses again.
-                            await idle.touch(model)
-                            logger("idle unload of \(model) failed, will retry: \(error)")
-                        }
-                    }
+                    let busy = await idle.busyModels(generation: generation)
+                    await worker.unloadIdleModels(after: idleSeconds, keeping: busy)
                     // Same policy for the resident TTS model: unload after
                     // `idleSeconds` without a load/synthesize request, but
                     // never while one is in flight.

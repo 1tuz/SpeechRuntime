@@ -218,7 +218,11 @@ struct RuntimePanel: View {
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Spacer()
-            Text(model.snapshot?.modelLoaded == true ? L("model.loaded") : L("model.idle"))
+            let modelState: String = {
+                if model.snapshot?.selectedModel?.loading == true { return L("model.loading") }
+                return model.snapshot?.modelLoaded == true ? L("model.loaded") : L("model.idle")
+            }()
+            Text(modelState)
                 .font(.system(size: 9, weight: .semibold))
                 .padding(.horizontal, 8).padding(.vertical, 5)
                 .background(Color.primary.opacity(0.055), in: Capsule())

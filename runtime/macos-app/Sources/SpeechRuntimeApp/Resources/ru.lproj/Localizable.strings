@@ -7,11 +7,13 @@
 "state.starting" = "Запуск и прогрев";
 "state.idle" = "Служба готова, модель выгружена";
 "state.ready" = "Готово к подключению";
+"state.loading" = "Загрузка модели по запросу";
 "state.listening" = "Приём аудио";
 "state.processing" = "Распознавание";
 "state.stopping" = "Остановка службы";
 "state.error" = "Требуется внимание";
 "model.loaded" = "В ПАМЯТИ";
+"model.loading" = "ЗАГРУЗКА";
 "model.idle" = "ПО ЗАПРОСУ";
 "metric.ane" = "Память Neural Engine";
 "metric.sessions" = "Активные сессии";

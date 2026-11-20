@@ -26,6 +26,11 @@ public actor IdlePolicy {
         activeStreams = activeStreams.filter { $0.value.generation >= generation }
     }
 
+    package func busyModels(generation: Int) -> Set<String> {
+        pruneStreams(before: generation)
+        return Set(activeStreams.values.map(\.model))
+    }
+
     public func modelsToUnload(idle: TimeInterval, probe: @Sendable (String) async -> Bool) async -> [String] {
         let busy = Set(activeStreams.values.map(\.model))
         var candidates: [String] = []

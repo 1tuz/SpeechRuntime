@@ -32,19 +32,21 @@ public struct RuntimeSnapshot: Decodable, Sendable {
     public struct Model: Decodable, Sendable {
         public let model: String
         public let loaded: Bool?
+        public let loading: Bool?
         public let device: String?
         public let inflight: Int?
         public let interactive: Int?
         public let batch: Int?
         public let done: Int?
         enum CodingKeys: String, CodingKey {
-            case model, loaded, device, inflight, done
+            case model, loaded, loading, device, inflight, done
             case interactive = "queued_interactive"
             case batch = "queued_batch"
         }
     }
     public var selectedModel: Model? { worker?.models?.first { $0.model == ModelSpec.id } }
     public var modelLoaded: Bool { selectedModel?.loaded == true }
+    public var modelLoading: Bool { selectedModel?.loading == true }
     public var processing: Bool { (selectedModel?.inflight ?? 0) > 0 }
     public var hasWorker: Bool { (worker?.pid ?? 0) > 0 && worker?.error == nil }
 }
