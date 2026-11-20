@@ -11,10 +11,10 @@ on:
 permissions:
   contents: write
 
-# Self-hosted Apple Silicon runner with the repository Rust toolchain and Xcode 26+.
+# GitHub-hosted Apple Silicon runner; the project requires macOS 26 SDK and Xcode 26+.
 jobs:
   build:
-    runs-on: [self-hosted, macOS]
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -83,8 +83,8 @@ jobs:
       - name: Compute checksums
         run: |
           cd dist
-          for f in *.dmg; do shasum -a 256 "$f" > "$f.sha256"; done
-          ls -l *.dmg *.sha256
+          for f in ./*.dmg; do shasum -a 256 "$f" > "$f.sha256"; done
+          ls -l ./*.dmg ./*.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
