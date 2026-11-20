@@ -77,8 +77,9 @@ public final class HTTPServer: @unchecked Sendable {
             // A client that opened a socket and stalled would otherwise pin the connection (and
             // its buffer) until the peer goes away. `cancel` on a finished connection is a no-op.
             let uploadDeadline = DispatchTime.now() + Limits.requestTimeout
-            let timeout = DispatchWorkItem { connection.cancel() }
-            self.queue.asyncAfter(deadline: uploadDeadline, execute: timeout)
+            let timeout = CancelableTimeout(nanoseconds: UInt64(Limits.requestTimeout * 1_000_000_000)) {
+                connection.cancel()
+            }
             self.receive(on: connection, buffer: Data(), deadline: uploadDeadline, timeout: timeout)
         }
         listener.start(queue: queue)
@@ -88,7 +89,7 @@ public final class HTTPServer: @unchecked Sendable {
         listener.cancel()
     }
 
-    private func receive(on connection: NWConnection, buffer: Data, deadline: DispatchTime, timeout: DispatchWorkItem) {
+    private func receive(on connection: NWConnection, buffer: Data, deadline: DispatchTime, timeout: CancelableTimeout) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             guard DispatchTime.now() < deadline else { connection.cancel(); return }
@@ -98,12 +99,13 @@ public final class HTTPServer: @unchecked Sendable {
             switch Self.parse(buffer) {
             case .ready(let parsed) where parsed.request.body.count >= parsed.contentLength:
                 let request = parsed.request
-                let responseTimeout: DispatchWorkItem
+                let responseTimeout: CancelableTimeout
                 if let seconds = Limits.asrResponseTimeout(request) {
                     guard DispatchTime.now() < deadline else { connection.cancel(); return }
                     timeout.cancel()
-                    responseTimeout = DispatchWorkItem { connection.cancel() }
-                    self.queue.asyncAfter(deadline: .now() + seconds, execute: responseTimeout)
+                    responseTimeout = CancelableTimeout(nanoseconds: UInt64(seconds * 1_000_000_000)) {
+                        connection.cancel()
+                    }
                 } else {
                     responseTimeout = timeout
                 }
@@ -112,7 +114,6 @@ public final class HTTPServer: @unchecked Sendable {
                     self.write(response, to: connection, timeout: responseTimeout)
                 }
                 return
-
             case .rejected(let failure):
                 // Reject before the body arrives: an oversized or malformed declaration is enough.
                 self.write(.error(failure.message, status: failure.status), to: connection, timeout: timeout)
@@ -128,7 +129,7 @@ public final class HTTPServer: @unchecked Sendable {
         }
     }
 
-    private func write(_ response: HTTPResponse, to connection: NWConnection, timeout: DispatchWorkItem) {
+    private func write(_ response: HTTPResponse, to connection: NWConnection, timeout: CancelableTimeout) {
         var head = "HTTP/1.1 \(response.status) \(Self.reason(response.status))\r\n"
         head += "Content-Length: \(response.body.count)\r\n"
         head += "Connection: close\r\n"
