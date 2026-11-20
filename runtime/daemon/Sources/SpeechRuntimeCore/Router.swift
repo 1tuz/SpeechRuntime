@@ -55,6 +55,7 @@ public struct Router: Sendable {
             case ("DELETE", "/v1/tts/voices"): return try await ttsDeleteVoice(request)
             case ("POST", "/v1/tts/synthesize"): return try await ttsSynthesize(request)
             case ("POST", "/v1/tts/cancel"): return try await ttsCancel(request)
+            case ("POST", "/v1/text/postprocess"): return try await textPostProcess(request)
             default: return .error("no route for \(request.method) \(request.path)", status: 404)
             }
         } catch let error as RuntimeError {
@@ -126,6 +127,47 @@ public struct Router: Sendable {
         "word_timestamps": true,
         "diarization": false,
     ]
+
+    // MARK: - Text postprocess
+
+    /// Shared transcript cleanup and exact dictionary substitution. The client sends only the
+    /// ASR transcript and its effective enabled rules; the runtime owns the algorithm so apps
+    /// do not each carry a second substituter. Response is exactly `{"text": ...}`.
+    private func textPostProcess(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let body = try Self.body(request)
+        guard let text = body["text"] as? String else {
+            throw RuntimeError.message("field \"text\" is required")
+        }
+        guard text.count <= TextPostProcess.Limits.textCharacters else {
+            throw RuntimeError.message("text is \(text.count) characters; the limit is \(TextPostProcess.Limits.textCharacters)")
+        }
+        let cleanup = (body["cleanup"] as? Bool) ?? false
+        let rawRules = body["rules"] as? [[String: Any]] ?? []
+        guard rawRules.count <= TextPostProcess.Limits.rules else {
+            throw RuntimeError.message("rules count \(rawRules.count) exceeds the limit of \(TextPostProcess.Limits.rules)")
+        }
+        var rules: [TextPostProcess.Rule] = []
+        rules.reserveCapacity(rawRules.count)
+        for (index, raw) in rawRules.enumerated() {
+            guard let spoken = raw["spoken"] as? String, let replacement = raw["replacement"] as? String else {
+                throw RuntimeError.message("rule \(index) requires string fields \"spoken\" and \"replacement\"")
+            }
+            guard spoken.count <= TextPostProcess.Limits.ruleCharacters,
+                  replacement.count <= TextPostProcess.Limits.ruleCharacters else {
+                throw RuntimeError.message("rule \(index) exceeds \(TextPostProcess.Limits.ruleCharacters) characters per side")
+            }
+            let words = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+            guard words <= TextPostProcess.Limits.ruleWords else {
+                throw RuntimeError.message("rule \(index) spoken side has \(words) words; the limit is \(TextPostProcess.Limits.ruleWords)")
+            }
+            rules.append(TextPostProcess.Rule(spoken: spoken, replacement: replacement))
+        }
+        let started = Date()
+        let result = TextPostProcess.apply(text, rules: rules, cleanup: cleanup)
+        log("text postprocess rules=\(rules.count) cleanup=\(cleanup) chars_in=\(text.count) chars_out=\(result.count) wall_ms=\(Int(Date().timeIntervalSince(started) * 1000))")
+        return .json(["text": result])
+    }
 
     private func models() async throws -> HTTPResponse {
         let configured = config().models

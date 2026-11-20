@@ -302,6 +302,35 @@ impl ModelHandle {
     }
 }
 
+/// Whether a failed load can be fixed by preparing the same file in place: an
+/// unprepared-for-ANE error on a backend that would use the Neural Engine.
+fn is_unprepared_ane_load(backend: &Backend, error: &wavo::Error) -> bool {
+    matches!(backend, Backend::NeuralEngine | Backend::Auto)
+        && matches!(
+            error,
+            wavo::Error::NeuralEngine(message) if message.contains("is not prepared for the Neural Engine")
+        )
+}
+
+/// First-use ANE remediation: a load that failed only because this program has never prepared
+/// the model (fresh cache, rebuilt worker, or an OS update dropped the Core ML cache) is fixed
+/// in place by compiling the same installed GGUF once and retrying. No download and no model
+/// substitution: `prepare` uses the exact file the load named. Any other load error is returned
+/// untouched, and `Ok(false)` (no Neural Engine on this machine) keeps the original error.
+fn prepare_and_retry(path: &PathBuf, backend: Backend, error: wavo::Error) -> std::result::Result<Model, wavo::Error> {
+    if !is_unprepared_ane_load(&backend, &error) {
+        return Err(error);
+    }
+    match wavo::Model::prepare(path, |_| std::ops::ControlFlow::Continue(())) {
+        Ok(true) => Model::load_with(path, backend),
+        // No Neural Engine on this machine: surface the original load error.
+        Ok(false) => Err(error),
+        Err(prepare_error) => Err(wavo::Error::NeuralEngine(format!(
+            "{error}; preparing the model in place then failed: {prepare_error}"
+        ))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     model_name: &str,
@@ -321,7 +350,9 @@ fn run(
                 _ => Backend::Auto,
             };
             let started = Instant::now();
-            match Model::load_with(path, backend) {
+            let outcome = Model::load_with(path, backend)
+                .or_else(|error| prepare_and_retry(path, backend, error));
+            match outcome {
                 Ok(m) => {
                     let dev = m.device().to_string();
                     *device.lock().unwrap() = Some(dev.clone());
@@ -480,5 +511,28 @@ mod tests {
             Response::Unloaded { model } => assert_eq!(model, "m"),
             other => panic!("expected unloaded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_the_unprepared_ane_load_error_is_remediable() {
+        let unprepared = wavo::Error::NeuralEngine(
+            "the model is not prepared for the Neural Engine: run `wavo pull` or wavo::Model::prepare".into(),
+        );
+        assert!(is_unprepared_ane_load(&Backend::NeuralEngine, &unprepared));
+        assert!(is_unprepared_ane_load(&Backend::Auto, &unprepared));
+        // A GPU-forced load never goes through the Neural Engine path.
+        assert!(!is_unprepared_ane_load(&Backend::Gpu, &unprepared));
+        // Any other load failure (corrupt file, permissions, Core ML crash) must not
+        // trigger a pointless prepare-and-retry loop.
+        assert!(!is_unprepared_ane_load(&Backend::NeuralEngine, &wavo::Error::Model("bad".into())));
+        assert!(!is_unprepared_ane_load(&Backend::Auto, &wavo::Error::NeuralEngine("compile failed".into())));
+    }
+
+    #[test]
+    fn a_missing_file_is_not_an_unprepared_model() {
+        // The live failure mode this guards: a removed or unreadable GGUF must surface its
+        // own error, not be mistaken for a preparation gap.
+        let io: wavo::Error = std::fs::read("/nonexistent/model.gguf").unwrap_err().into();
+        assert!(!is_unprepared_ane_load(&Backend::Auto, &io));
     }
 }
