@@ -87,8 +87,49 @@ final class SetupWizardTests: XCTestCase {
         XCTAssertEqual(state.step, .welcome)
         XCTAssertFalse(state.isLast)
     }
+    func testNemotronDiarizationIsManagedNotPlainAsset() {
+        // The managed component must NOT offer a plain single-file asset:
+        // it installs executable + model through its own pinned spec.
+        XCTAssertEqual(OptionalComponent.nemotronDiarization.rawValue, "nemotron-diarization")
+        XCTAssertNil(OptionalComponent.nemotronDiarization.asset)
+        XCTAssertTrue(NemotronDiarizationSpec.isPinned)
+    }
+    func testNemotronSpecPinsTrustedSources() {
+        // Engine: exact upstream Wavo v0.6.0 Apple Silicon release tarball.
+        XCTAssertEqual(NemotronDiarizationSpec.engineAsset.fileName, "wavo-v0.6.0-aarch64-apple-darwin.tar.gz")
+        XCTAssertEqual(NemotronDiarizationSpec.engineAsset.bytes, 17_422_551)
+        XCTAssertEqual(NemotronDiarizationSpec.engineAsset.sha256,
+                       "73bef04a24a7984a047146e01855429881c3dd1c70b11391f46cccdd69b9457a")
+        XCTAssertTrue(NemotronDiarizationSpec.engineAsset.url.absoluteString
+            .hasPrefix("https://github.com/vladkens/wavo/releases/download/v0.6.0/"))
+        XCTAssertTrue(NemotronDiarizationSpec.engineAsset.isValidTarball)
+        // Extracted executable: pinned by content, not by archive member name.
+        XCTAssertEqual(NemotronDiarizationSpec.executableBytes, 14_691_368)
+        XCTAssertEqual(NemotronDiarizationSpec.executableSha256,
+                       "f640230c8983791c16c2bd38ac42caaf9c516bc46fff45e955cc37d3256b3652")
+        XCTAssertEqual(NemotronDiarizationSpec.archiveMemberName, "wavo")
+        // Model: exact revision of the official GGUF conversion, never /main/.
+        XCTAssertEqual(NemotronDiarizationSpec.modelRepository, "mudler/Nemotron-3-Diarization-GGUF")
+        XCTAssertEqual(NemotronDiarizationSpec.modelRevision, "4ff894d7390caf5833f7d5520494847a7b377797")
+        XCTAssertEqual(NemotronDiarizationSpec.modelFile, "nemotron-3-diarization-q8_0.gguf")
+        XCTAssertEqual(NemotronDiarizationSpec.modelBytes, 108_674_112)
+        XCTAssertEqual(NemotronDiarizationSpec.modelSha256,
+                       "5fc242eae535d7b4ab59fd019b6fff2731b9772508b235cec89f44b1b1cc66d9")
+        XCTAssertTrue(NemotronDiarizationSpec.modelURL.absoluteString
+            .contains("/resolve/\(NemotronDiarizationSpec.modelRevision)/"))
+        XCTAssertFalse(NemotronDiarizationSpec.modelURL.absoluteString.contains("/resolve/main/"))
+        // Canonical managed layout.
+        XCTAssertEqual(NemotronDiarizationSpec.installDirectoryName, "nemotron-diarization")
+        XCTAssertEqual(NemotronDiarizationSpec.lockFileName, "nemotron-diarization.lock")
+        XCTAssertEqual(NemotronDiarizationSpec.executableName, "wavo")
+        XCTAssertEqual(NemotronDiarizationSpec.modelFileName, "model.gguf")
+        XCTAssertEqual(NemotronDiarizationSpec.totalBytes, 17_422_551 + 108_674_112)
+    }
+    func testOptionalComponentCountIsSixWithNemotronLast() {
+        XCTAssertEqual(OptionalComponent.allCases.count, 6)
+        XCTAssertEqual(OptionalComponent.allCases.last, .nemotronDiarization)
+    }
     func testOptionalAssetsHavePinnedIntegrityMetadata() {
-        XCTAssertEqual(OptionalComponent.allCases.count, 5)
         for component in [OptionalComponent.smartTurn, .weSpeaker] {
             guard let asset = component.asset else { XCTFail("missing asset \(component)"); continue }
             XCTAssertTrue(asset.isValid)

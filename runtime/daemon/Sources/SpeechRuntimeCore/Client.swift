@@ -101,6 +101,29 @@ public struct RuntimeClient: Sendable {
         return try await send("POST", "/v1/audio/transcriptions", query: query, body: wav, contentType: "audio/wav")
     }
 
+    /// Optional post-transcription annotation; never changes ASR or streaming.
+    /// Long explicit calls (managed model invocation) can legitimately take minutes, so this
+    /// helper reuses the same session that already allows 600 s per request / 900 s overall.
+    public func diarizationStatus() async throws -> [String: Any] {
+        try await send("GET", "/v1/diarization")
+    }
+
+    public func diarize(
+        segments: [[String: Any]],
+        mode: String = "source",
+        systemWAV: Data? = nil,
+        systemAudioOffsetMs: Int = 0
+    ) async throws -> [String: Any] {
+        var body: [String: Any] = [
+            "mode": mode,
+            "segments": segments,
+            "system_audio_offset_ms": systemAudioOffsetMs,
+        ]
+        if let systemWAV { body["system_audio_base64"] = systemWAV.base64EncodedString() }
+        return try await send("POST", "/v1/audio/diarization",
+                              body: try JSONSerialization.data(withJSONObject: body))
+    }
+
     public func openStream(model: String, config: [String: Any] = [:]) async throws -> [String: Any] {
         var body: [String: Any] = ["model": model, "config": config]
         if let language = config["language"] { body["language"] = language }

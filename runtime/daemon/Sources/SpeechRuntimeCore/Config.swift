@@ -37,6 +37,12 @@ public struct RuntimeConfig: Sendable {
     /// Interactive requests are never split.
     public var batchChunkMs: Int = 10_000
     public var models: [String: ModelEntry] = [:]
+    /// Separate optional Wavo 0.6 CLI for post-transcription Nemotron only.
+    /// Never changes the resident wavo 0.4 ASR worker.
+    public var diarizationBinary: String = ""
+    /// Explicit GGUF override. Empty means the managed optional component path.
+    public var diarizationModel: String = ""
+    public var diarizationBackend: String = "cpu"
     /// NDJSON `soniqo-tts-sidecar` that owns the resident TTS model. One
     /// process serves every client of this runtime.
     public var ttsBinary: String = ""
@@ -51,6 +57,11 @@ public struct RuntimeConfig: Sendable {
         batchChunkMs = (jsonObject["batchChunkMs"] as? NSNumber)?.intValue ?? 10_000
         if let rawModels = jsonObject["models"] as? [String: [String: Any]] {
             models = rawModels.mapValues(ModelEntry.init(jsonObject:))
+        }
+        if let diarization = jsonObject["diarization"] as? [String: Any] {
+            diarizationBinary = diarization["binary"] as? String ?? ""
+            diarizationModel = diarization["model"] as? String ?? ""
+            diarizationBackend = diarization["backend"] as? String ?? "cpu"
         }
         if let tts = jsonObject["tts"] as? [String: Any] {
             ttsBinary = tts["binary"] as? String ?? ""
@@ -79,6 +90,8 @@ public struct RuntimeConfig: Sendable {
             return entry
         }
         config.ttsBinary = (config.ttsBinary as NSString).expandingTildeInPath
+        config.diarizationBinary = (config.diarizationBinary as NSString).expandingTildeInPath
+        config.diarizationModel = (config.diarizationModel as NSString).expandingTildeInPath
         return config
     }
 }
@@ -91,6 +104,26 @@ public enum Paths {
 
     public static var token: URL { support.appendingPathComponent("token") }
     public static var config: URL { support.appendingPathComponent("config.json") }
+
+    /// Canonical location of the optional managed Nemotron components. Never
+    /// created implicitly: source/GET availability probes only stat these paths.
+    public static var optionalModels: URL {
+        support.appendingPathComponent("OptionalModels", isDirectory: true)
+    }
+
+    public static var nemotronDiarization: URL {
+        optionalModels.appendingPathComponent("nemotron-diarization", isDirectory: true)
+    }
+
+    public static var diarizationBinaryPath: URL { nemotronDiarization.appendingPathComponent("wavo") }
+    public static var diarizationModelPath: URL { nemotronDiarization.appendingPathComponent("model.gguf") }
+
+    /// Sibling of the component directory. The flock LOCK_EX|LOCK_NB holder
+    /// publishes, removes or invokes the managed components.
+    public static var diarizationLock: URL {
+        optionalModels.appendingPathComponent("nemotron-diarization.lock")
+    }
+
     public static var log: URL { support.appendingPathComponent("daemon.log") }
 
     public static func workerBinary() -> String {

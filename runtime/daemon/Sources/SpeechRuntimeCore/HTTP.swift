@@ -64,9 +64,17 @@ public final class HTTPServer: @unchecked Sendable {
                 return WorkerClient.unloadTimeout + WorkerClient.loadTimeout + WorkerClient.openTimeout + 5
             case ("POST", "/v1/audio/transcriptions"):
                 return WorkerClient.transcribeBudget + 5
+            case ("POST", "/v1/audio/diarization"):
+                return DiarizationHost.timeoutSeconds + 5
             default:
                 return nil
             }
+        }
+
+        /// Only the new long-pending diarization route gets handler-task cancellation
+        /// on timeout/peer-close; every other request keeps the existing behavior.
+        static func cancelsHandlerTask(_ request: HTTPRequest) -> Bool {
+            request.method == "POST" && request.path == "/v1/audio/diarization"
         }
     }
 
@@ -99,19 +107,48 @@ public final class HTTPServer: @unchecked Sendable {
             switch Self.parse(buffer) {
             case .ready(let parsed) where parsed.request.body.count >= parsed.contentLength:
                 let request = parsed.request
-                let responseTimeout: CancelableTimeout
-                if let seconds = Limits.asrResponseTimeout(request) {
-                    guard DispatchTime.now() < deadline else { connection.cancel(); return }
+                // Only the new diarization route gets a cancellable handler task. The response
+                // timeout cancels both the task and the connection (bounded lifetime: a peer
+                // that silently disappears cannot pin the daemon's work longer than
+                // `DiarizationHost.timeoutSeconds + 5`; NWConnection state alone may not
+                // surface a TCP FIN during a one-request-per-connection exchange). The CLI
+                // subprocess is separately bounded by the DiarizationHost watchdog. ASR
+                // routes keep their existing fire-and-forget behavior untouched.
+                if Limits.cancelsHandlerTask(request), let seconds = Limits.asrResponseTimeout(request) {
                     timeout.cancel()
-                    responseTimeout = CancelableTimeout(nanoseconds: UInt64(seconds * 1_000_000_000)) {
+                    let handlerTask = Task { await self.handler(request) }
+                    let responseTimeout = CancelableTimeout(nanoseconds: UInt64(seconds * 1_000_000_000)) {
+                        handlerTask.cancel()
                         connection.cancel()
                     }
+                    connection.stateUpdateHandler = { state in
+                        if case .ready = state {} else { handlerTask.cancel() }
+                    }
+                    Task {
+                        let response = await handlerTask.value
+                        connection.stateUpdateHandler = nil
+                        guard !handlerTask.isCancelled else {
+                            responseTimeout.cancel()
+                            connection.cancel()
+                            return
+                        }
+                        self.write(response, to: connection, timeout: responseTimeout)
+                    }
                 } else {
-                    responseTimeout = timeout
-                }
-                Task {
-                    let response = await self.handler(request)
-                    self.write(response, to: connection, timeout: responseTimeout)
+                    let responseTimeout: CancelableTimeout
+                    if let seconds = Limits.asrResponseTimeout(request) {
+                        guard DispatchTime.now() < deadline else { connection.cancel(); return }
+                        timeout.cancel()
+                        responseTimeout = CancelableTimeout(nanoseconds: UInt64(seconds * 1_000_000_000)) {
+                            connection.cancel()
+                        }
+                    } else {
+                        responseTimeout = timeout
+                    }
+                    Task {
+                        let response = await self.handler(request)
+                        self.write(response, to: connection, timeout: responseTimeout)
+                    }
                 }
                 return
             case .rejected(let failure):
@@ -276,7 +313,9 @@ public final class HTTPServer: @unchecked Sendable {
             headers[key] = value
         }
         let length = contentLength ?? 0
-        guard length <= Limits.bodyBytes else { return .rejected(.bodyTooLarge) }
+        let limit = method == "POST" && path == "/v1/audio/diarization"
+            ? Router.diarizationBodyBytes : Limits.bodyBytes
+        guard length <= limit else { return .rejected(.bodyTooLarge) }
         let bodyStart = range.upperBound
         let available = buffer.distance(from: bodyStart, to: buffer.endIndex)
         let body = available >= length ? buffer[bodyStart..<buffer.index(bodyStart, offsetBy: length)] : Data()

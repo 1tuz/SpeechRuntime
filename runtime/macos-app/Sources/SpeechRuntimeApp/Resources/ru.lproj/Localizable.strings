@@ -127,4 +127,12 @@
 "optional.install" = "Скачать веса";
 "optional.delete" = "Удалить веса";
 "optional.delete.confirm" = "Удалить файл дополнительной модели?";
-"optional.error.integrity" = "Размер или SHA-256 не соответствует опубликованным весам.";
+"optional.nemotron-diarization.title" = "Диаризация Nemotron 3 (Wavo)";
+"optional.nemotron-diarization.detail" = "Размечает, кто и когда говорил, в записанном системном звуке — после транскрипции. Отдельный исполняемый файл Wavo 0.6 запускается только по запросу; в приложение ничего не встраивается, в простое модель не загружается. Движок и веса GGUF скачиваются, проверяются и управляются здесь.";
+"optional.nemotron.status.notInstalled" = "не установлено";
+"optional.nemotron.status.installed" = "движок и модель проверены на диске";
+"optional.nemotron.install" = "Скачать движок и модель";
+"optional.nemotron.error.busy" = "Движок используется запущенной службой. Повторите после завершения текущего запроса диаризации.";
+"optional.nemotron.error.archive" = "Скачанный архив движка не является доверенным релизом Wavo.";
+"optional.nemotron.error.extract" = "Не удалось извлечь исполняемый файл Wavo системным tar.";
+"optional.nemotron.status.removalFailed" = "по-прежнему установлено; удаление не удалось";

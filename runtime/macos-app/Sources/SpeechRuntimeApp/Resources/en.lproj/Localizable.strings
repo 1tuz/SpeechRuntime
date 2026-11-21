@@ -127,4 +127,13 @@
 "optional.install" = "Download weights";
 "optional.delete" = "Delete weights";
 "optional.delete.confirm" = "Delete this optional model file?";
-"optional.error.integrity" = "Size or SHA-256 differs from the published model.";
+"optional.nemotron-diarization.title" = "Nemotron 3 diarization (Wavo)";
+"optional.nemotron-diarization.detail" = "Marks who spoke when in recorded system audio, after transcription. Runs the separate Wavo 0.6 executable on demand; nothing is bundled and no model loads in idle. The engine and its GGUF weights are downloaded, verified and managed here.";
+"optional.nemotron.status.notInstalled" = "not installed";
+"optional.nemotron.status.installed" = "engine + model verified on disk";
+"optional.nemotron.install" = "Download engine and model";
+"optional.nemotron.error.busy" = "The engine is in use by the running service. Try again after the current diarization request finishes.";
+"optional.nemotron.error.archive" = "The downloaded engine archive is not the trusted Wavo release.";
+"optional.nemotron.error.extract" = "Could not extract the Wavo executable with the system tar.";
+"optional.nemotron.error.signature" = "The extracted executable failed macOS code signature verification.";
+"optional.nemotron.status.removalFailed" = "still installed; removal failed";

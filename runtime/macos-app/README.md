@@ -158,7 +158,7 @@ No rerun of existing audio benchmarks is a prerequisite for this UI patch.
 The implementation is supplied as source, not as a claimed tested macOS binary.
 See `SOURCES.md` for the ready-made APIs/components evaluated. No Keepresso source is copied.
 
-## Optional models in Wizard and Settings (asset management only)
+## Optional components
 
 The optional-models step and Settings section let users install, verify, cancel and remove
 **two pinned ONNX weight files** without enabling them in the inference pipeline:
@@ -170,16 +170,18 @@ Assets go to `~/Library/Application Support/SpeechRuntime/OptionalModels/`, dist
 from the Parakeet model and its receipt. Downloads use the existing URLSession
 streaming downloader; a temporary file is hash-checked before being moved into place.
 An interrupted download never becomes an installed model. Opening Settings verifies
-previously installed files asynchronously. Deletion only removes that optional file.
+previously installed files asynchronously. Removal affects only the selected component.
 
 **Important:** The current daemon/worker has **no** Smart Turn or WeSpeaker inference
 implementation or API capability. The UI does not claim otherwise. LocalVQE,
 LS-EEND and forced alignment are listed with their intended purpose but their
 install controls remain disabled until a complete runtime backend, full set of
 assets, integrity manifest and lifecycle have been implemented. Simply downloading
-weights is not enough to enable the capability. No optional models are auto-loaded
-into RAM/ANE in this patch. The existing 15-minute ASR idle-unload is unchanged.
+weights is not enough to enable those capabilities.
 
-The installer still ships no optional weights; no extra ONNX/CoreML runtime is
-bundled. Inference integration must add negotiated per-session capabilities and
-on-demand loading/unloading separately, without slowing down existing dictation.
+Nemotron 3 Diarization is a separate optional component. Its install action downloads
+Wavo 0.6.0 and the Nemotron GGUF, verifies both, and keeps them outside the app bundle.
+Remove deletes both files and refuses while the daemon is using them. Neither setup
+nor service startup installs or loads this component. Inference runs only for explicit
+system-audio requests to the [diarization API](../docs/diarization-api.md). It does not
+modify the ASR worker or its idle-unload policy.

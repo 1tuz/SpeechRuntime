@@ -56,6 +56,8 @@ struct OptionalComponentsSection: View {
             HStack(spacing: 6) {
                 if let asset = component.asset {
                     Text(ByteCountFormatter.string(fromByteCount: asset.bytes, countStyle: .file))
+                } else if component == .nemotronDiarization {
+                    Text(ByteCountFormatter.string(fromByteCount: NemotronDiarizationSpec.totalBytes, countStyle: .file))
                 } else {
                     Text(L(component.sizeKey))
                 }
@@ -63,11 +65,14 @@ struct OptionalComponentsSection: View {
                 switch status {
                 case .unavailable: Text(L("optional.status.planned"))
                 case .checking: Text(L("optional.status.verifying"))
-                case .absent: Text(L("optional.status.notInstalled"))
+                case .absent: Text(L(component == .nemotronDiarization
+                    ? "optional.nemotron.status.notInstalled" : "optional.status.notInstalled"))
                 case .downloading(let fraction):
                     Text(String(format: L("optional.status.download"), fraction * 100))
-                case .installed: Text(L("optional.status.installed"))
+                case .installed: Text(L(component == .nemotronDiarization
+                    ? "optional.nemotron.status.installed" : "optional.status.installed"))
                 case .failed: Text(L("optional.status.error"))
+                case .removalFailed: Text(L("optional.nemotron.status.removalFailed"))
                 }
             }
             .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -98,19 +103,27 @@ struct OptionalComponentsSection: View {
             .buttonStyle(.borderless)
         case .installed:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                .accessibilityLabel(L("optional.status.installed"))
+                .accessibilityLabel(L(component == .nemotronDiarization
+                    ? "optional.nemotron.status.installed" : "optional.status.installed"))
             Button { pendingRemoval = component } label: {
                 Image(systemName: "xmark.circle")
             }
             .help(L("optional.delete"))
             .buttonStyle(.borderless)
+        case .removalFailed:
+            // Files are still installed: keep the removal (retry) button.
+            Button { pendingRemoval = component } label: {
+                Image(systemName: "exclamationmark.triangle")
+            }
+            .help(L("optional.delete"))
+            .buttonStyle(.borderless)
         case .absent, .failed:
-            Toggle(L("optional.install"), isOn: Binding(
+            Toggle(L(component == .nemotronDiarization ? "optional.nemotron.install" : "optional.install"), isOn: Binding(
                 get: { false },
                 set: { if $0 { store.install(component) } }
             ))
             .labelsHidden().toggleStyle(.switch).controlSize(.mini)
-            .help(L("optional.install"))
+            .help(L(component == .nemotronDiarization ? "optional.nemotron.install" : "optional.install"))
         }
     }
 }

@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 /// HTTP surface. Kept deliberately small: models, one-shot transcription, streaming sessions and
@@ -9,6 +10,7 @@ public struct Router: Sendable {
     public let idle: IdlePolicy
     public let tts: TtsHost
     public let voices: VoiceStore
+    public let diarization = DiarizationHost()
     public let startedAt = Date()
     public let log: @Sendable (String) -> Void
     private let sessions = SessionTable()
@@ -39,9 +41,11 @@ public struct Router: Sendable {
             switch (request.method, request.path) {
             case ("GET", "/health"): return try await health()
             case ("GET", "/v1/models"): return try await models()
+            case ("GET", "/v1/diarization"): return diarizationCapabilities()
             case ("POST", "/v1/models/load"): return try await load(request)
             case ("POST", "/v1/models/unload"): return try await unload(request)
             case ("POST", "/v1/audio/transcriptions"): return try await transcribe(request)
+            case ("POST", "/v1/audio/diarization"): return try await diarize(request)
             case ("POST", "/v1/streams"): return try await openStream(request)
             case ("POST", "/v1/streams/audio"): return try await streamAudio(request)
             case ("POST", "/v1/streams/end"): return try await endStream(request)
@@ -127,6 +131,12 @@ public struct Router: Sendable {
         "word_timestamps": true,
         "diarization": false,
     ]
+
+    /// Per-route cap for POST /v1/audio/diarization only. A meeting WAV is sent as base64
+    /// inside JSON, so 4/3 expansion applies: 128 MiB of raw body allows ~96 MiB WAV, about
+    /// 50 minutes of 16 kHz mono 16-bit PCM (32 KiB/s). The global 256 MiB body cap and the
+    /// timeouts of every other route stay untouched.
+    static let diarizationBodyBytes = 128 * 1024 * 1024
 
     // MARK: - Text postprocess
 
@@ -258,6 +268,97 @@ public struct Router: Sendable {
         payload["wall_ms"] = Int(Date().timeIntervalSince(started) * 1000)
         payload["audio_ms"] = audio.samples.count * 1000 / 16_000
         return .json(payload)
+    }
+
+    // MARK: - Post-transcription diarization (never on the ASR/streaming path)
+
+    /// Resolves the Wavo 0.6 CLI and model for post-transcription Nemotron.
+    /// `env` wins, then an explicit `diarization.binary`/`model`, then the managed
+    /// optional components. Returns the lock URL whenever a managed path is in play,
+    /// so publish/remove/invocation serialize on one flock file.
+    private func diarizationToolchain() -> (binary: String, model: String, backend: String, lockURL: URL?) {
+        let settings = config()
+        let envBinary = ProcessInfo.processInfo.environment["SPEECH_RUNTIME_WAVO_BINARY"]
+        let managedBinary = Paths.diarizationBinaryPath.path
+        let binary = envBinary
+            ?? (settings.diarizationBinary.isEmpty ? managedBinary : settings.diarizationBinary)
+        let model = settings.diarizationModel.isEmpty ? Paths.diarizationModelPath.path : settings.diarizationModel
+        let usesManaged = binary == managedBinary || model == Paths.diarizationModelPath.path
+        return (binary, model, settings.diarizationBackend, usesManaged ? Paths.diarizationLock : nil)
+    }
+
+    private func diarizationCapabilities() -> HTTPResponse {
+        let toolchain = diarizationToolchain()
+        return .json([
+            "post_transcription_only": true,
+            "modes": [
+                "source": ["available": true],
+                "nemotron": [
+                    "available": DiarizationHost.isExecutable(toolchain.binary),
+                    "model": "nemotron-diarization",
+                    "model_available": DiarizationHost.isModelAvailable(toolchain.model),
+                    "engine": "wavo 0.6",
+                    "backend": toolchain.backend,
+                ] as [String: Any],
+            ] as [String: Any],
+        ])
+    }
+
+    private func diarize(_ request: HTTPRequest) async throws -> HTTPResponse {
+        guard request.body.count <= Self.diarizationBodyBytes else {
+            throw RuntimeError.message(
+                "diarization request body is \(request.body.count) bytes; the limit is \(Self.diarizationBodyBytes)")
+        }
+        let body = try Self.body(request)
+        guard let name = body["mode"] as? String,
+              let mode = Diarization.Mode(rawValue: name) else {
+            throw RuntimeError.message("mode must be source or nemotron")
+        }
+        guard let segments = body["segments"] as? [[String: Any]] else {
+            throw RuntimeError.message("segments must be an array")
+        }
+        let offset: Int
+        if let rawOffset = body["system_audio_offset_ms"] {
+            guard CFGetTypeID(rawOffset as AnyObject) != CFBooleanGetTypeID(),
+                  let value = rawOffset as? Int else {
+                throw RuntimeError.message("system_audio_offset_ms must be an integer")
+            }
+            offset = value
+        } else {
+            offset = 0
+        }
+        // Validate every segment (and the offset) before any costly model load.
+        // `annotate` never redecodes or reorders transcript content.
+        let bySource = try Diarization.annotate(
+            segments, mode: .source, systemAudioOffsetMs: offset
+        )
+        var turns: [Diarization.Turn] = []
+        if mode == .nemotron && segments.contains(where: { $0["source"] as? String == "system" }) {
+            guard let encoded = body["system_audio_base64"] as? String,
+                  let wav = Data(base64Encoded: encoded),
+                  wav.count >= 44,
+                  wav.prefix(4) == Data("RIFF".utf8),
+                  wav[8..<12] == Data("WAVE".utf8) else {
+                throw RuntimeError.message("nemotron requires system_audio_base64 containing a WAV file")
+            }
+            let toolchain = diarizationToolchain()
+            turns = try await diarization.diarize(
+                wav: wav, binary: toolchain.binary, model: toolchain.model,
+                backend: toolchain.backend, lock: toolchain.lockURL
+            )
+        }
+        let annotated = mode == .source ? bySource : try Diarization.annotate(
+            segments, mode: .nemotron, turns: turns, systemAudioOffsetMs: offset
+        )
+        log("diarization mode=\(mode.rawValue) segments=\(segments.count) turns=\(turns.count)")
+        return .json([
+            "mode": mode.rawValue,
+            "segments": annotated,
+            "turns": turns.map { turn in
+                Diarization.Turn(speaker: turn.speaker, startMs: turn.startMs + offset,
+                                 endMs: turn.endMs + offset).json
+            },
+        ])
     }
 
     // MARK: - TTS
