@@ -8,6 +8,7 @@ import RuntimeUIModel
 /// The current daemon does not load these; a future driver must opt in explicitly.
 /// The Nemotron diarization entry is a managed two-asset install (executable +
 /// GGUF) with its own flock lifecycle; see NemotronManagedInstall.
+@MainActor
 final class OptionalComponentsStore: ObservableObject {
     enum Status: Equatable {
         case checking, absent, downloading(Double), installed, failed(String), unavailable
