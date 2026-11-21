@@ -98,10 +98,21 @@ the panel reports that loading state separately from idle and ready. A client ma
 explicitly call `/v1/models/load` before sending audio, but no automatic GPU or
 GigaAM fallback is performed.
 
-To update, turn the service off and quit the interface, then run the installer again. Model files,
-preferences, and the API token remain outside the bundle and are preserved. To uninstall, turn off
-login startup, turn off the service, quit the interface and remove the app. Model/data removal is
-manual so uninstalling the UI never silently deletes recordings or unrelated developer data.
+### Updating
+
+From v0.4.3 the built-in **Update** control downloads the new build, installs it, and
+relaunches only the GUI process; the LaunchAgent and daemon keep running, so ongoing
+ASR sessions are not interrupted. Model files, preferences, the API token and the
+agent's Application Support files stay outside the app bundle and are preserved.
+
+If your installed version cannot update itself, download the latest DMG from
+[GitHub Releases](https://github.com/1tuz/SpeechRuntime/releases/latest). Turn the
+service off, quit the interface, and replace the existing `Speech Runtime.app`
+with the copy from the DMG. Open it from its installed location, not the disk image.
+
+To uninstall, turn off login startup, turn off the service, quit the interface and
+remove the app. Model/data removal is manual so uninstalling the UI never silently
+deletes recordings or unrelated developer data.
 
 ## Other applications
 

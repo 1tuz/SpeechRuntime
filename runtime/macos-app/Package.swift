@@ -14,6 +14,7 @@ let package = Package(
             resources: [.process("Resources")]
         ),
         .testTarget(name: "RuntimeUIModelTests", dependencies: ["RuntimeUIModel"]),
+        .testTarget(name: "SpeechRuntimeAppTests", dependencies: ["SpeechRuntimeApp"]),
     ],
     swiftLanguageModes: [.v5]
 )

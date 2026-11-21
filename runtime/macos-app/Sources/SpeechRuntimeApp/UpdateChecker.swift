@@ -81,76 +81,69 @@ enum UpdateChecker {
         guard actual == expected else { throw AppFailure(L("update.error.integrity")) }
 
         let running = Bundle.main.bundleURL
-        let installRoot = running.deletingLastPathComponent()
         guard running.pathExtension == "app" else {
             throw AppFailure(L("update.error.install"))
         }
-        try await replaceApp(fromDMG: temp, in: installRoot)
+        try await replaceApp(fromDMG: temp, at: running,
+                             expectedVersion: String(release.tag_name.drop(while: { $0 == "v" })))
     }
 
-    /// Mounts the DMG read-only, moves the new app over the old one
-    /// (old bundle renamed aside first, then removed), unmounts.
-    static func replaceApp(fromDMG dmg: URL, in root: URL) async throws {
-        let mount = try await mountDMG(dmg)
-        defer { try? detach(mount) }
+    /// Mounts the DMG read-only, stages the new app next to the old one,
+    /// then swaps the old bundle aside and renames the staged bundle into
+    /// place. On failure the old bundle is restored untouched.
+    static func replaceApp(fromDMG dmg: URL, at target: URL, expectedVersion: String) async throws {
+        let mount = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SpeechRuntime-mount-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: mount) }
+        try await mountDMG(dmg, at: mount)
+        defer { try? runDiskImageTool(["detach", mount.path, "-quiet"]) }
         let newApp = mount.appendingPathComponent("Speech Runtime.app")
-        guard FileManager.default.fileExists(atPath: newApp.path) else {
+        guard let info = Bundle(url: newApp)?.infoDictionary,
+              info["CFBundleIdentifier"] as? String == "com.speechruntime.app",
+              info["CFBundleShortVersionString"] as? String == expectedVersion else {
             throw AppFailure(L("update.error.assets"))
         }
-        let oldApp = root.appendingPathComponent("Speech Runtime.app")
-        let aside = root.appendingPathComponent("Speech Runtime.old-\(UUID().uuidString)")
-        if FileManager.default.fileExists(atPath: oldApp.path) {
-            try FileManager.default.moveItem(at: oldApp, to: aside)
-        }
+        let staged = target.deletingLastPathComponent()
+            .appendingPathComponent(".\(target.lastPathComponent).staged-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: staged) }
         do {
-            try FileManager.default.copyItem(at: newApp, to: oldApp)
-            try? FileManager.default.removeItem(at: aside)
-        } catch {
-            // Put the old bundle back; a half-replaced install is worse.
-            if FileManager.default.fileExists(atPath: aside.path) {
-                try? FileManager.default.moveItem(at: aside, to: oldApp)
+            try FileManager.default.copyItem(at: newApp, to: staged)
+            let aside = target.deletingLastPathComponent()
+                .appendingPathComponent(".\(target.lastPathComponent).old-\(UUID().uuidString)")
+            var movedOld = false
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.moveItem(at: target, to: aside)
+                movedOld = true
             }
+            do {
+                try FileManager.default.moveItem(at: staged, to: target)
+                try? FileManager.default.removeItem(at: aside)
+            } catch {
+                if movedOld { try? FileManager.default.moveItem(at: aside, to: target) }
+                throw error
+            }
+        } catch {
             throw AppFailure(L("update.error.install"))
         }
     }
 
-    private static func mountDMG(_ dmg: URL) async throws -> URL {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-            task.arguments = ["attach", dmg.path, "-nobrowse", "-readonly", "-plist"]
-            task.standardOutput = Pipe()
-            task.standardError = Pipe()
-            do {
-                try task.run()
-            } catch {
-                continuation.resume(throwing: AppFailure(L("update.error.install")))
-                return
-            }
-            task.terminationHandler = { process in
-                guard process.terminationStatus == 0,
-                      let data = (process.standardOutput as? Pipe)?.fileHandleForReading.readDataToEndOfFile(),
-                      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]]
-                else {
-                    continuation.resume(throwing: AppFailure(L("update.error.install")))
-                    return
-                }
-                let path = plist.compactMap { $0["mount-point"] as? String }.first
-                if let path {
-                    continuation.resume(returning: URL(fileURLWithPath: path))
-                } else {
-                    continuation.resume(throwing: AppFailure(L("update.error.install")))
-                }
-            }
-        }
+    private static func mountDMG(_ dmg: URL, at mount: URL) async throws {
+        try await Task.detached(priority: .utility) {
+            try runDiskImageTool(["attach", dmg.path, "-nobrowse", "-readonly", "-mountpoint", mount.path])
+        }.value
     }
 
-    private static func detach(_ mount: URL) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-        task.arguments = ["detach", mount.path, "-quiet"]
-        try? task.run()
-        task.waitUntilExit()
+    private static func runDiskImageTool(_ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw AppFailure(L("update.error.install")) }
     }
 
     private static func sha256(of file: URL) async throws -> String {

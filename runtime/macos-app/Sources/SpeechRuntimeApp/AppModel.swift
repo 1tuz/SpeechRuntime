@@ -128,13 +128,17 @@ final class AppModel: ObservableObject {
     func dismissUpdateMessage() { updateMessage = nil }
 
     private func relaunchApp() {
-        let bundle = Bundle.main.bundleURL
-        monitor?.cancel()
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        task.arguments = ["-n", bundle.path]
-        try? task.run()
-        NSApp.terminate(nil)
+        // The helper waits for this process to exit before opening the new
+        // copy, so the duplicate-instance guard in AppMain never trips.
+        // Quit only if the relaunch was actually scheduled; otherwise the
+        // updated app stays running and the error is shown to the user.
+        switch UpdateRelaunch.schedule(bundlePath: Bundle.main.bundleURL.path, currentPID: ProcessInfo.processInfo.processIdentifier) {
+        case .scheduled:
+            monitor?.cancel()
+            NSApp.terminate(nil)
+        case .failed:
+            updateMessage = L("update.error.relaunch")
+        }
     }
     func visibilityChanged(_ visible: Bool) {
         panelVisible = visible

@@ -96,6 +96,7 @@
 "update.error.assets" = "The release has no installer assets.";
 "update.error.integrity" = "Downloaded update failed verification.";
 "update.error.install" = "Could not install the update.";
+"update.error.relaunch" = "Could not restart the app after the update.";
 "permissions.title" = "Permissions";
 "permissions.login.title" = "Open at login";
 "permissions.login.note" = "macOS shows its own approval sheet; manage it in System Settings.";

@@ -96,6 +96,7 @@
 "update.error.assets" = "В релизе нет установочных файлов.";
 "update.error.integrity" = "Загруженное обновление не прошло проверку.";
 "update.error.install" = "Не удалось установить обновление.";
+"update.error.relaunch" = "Не удалось перезапустить приложение после обновления.";
 "permissions.title" = "Разрешения";
 "permissions.login.title" = "Запуск при входе";
 "permissions.login.note" = "macOS сам показывает диалог разрешения; управление — в Системных настройках.";
