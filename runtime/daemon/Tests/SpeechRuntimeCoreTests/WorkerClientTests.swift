@@ -234,6 +234,7 @@ final class WaiterTableTests: XCTestCase {
             await withCheckedContinuation { continuation in _ = table.add(session: "a", continuation: continuation) }
             expired.fulfill()
         }
+        await waitUntil { table.count == 1 }
         let taskB = Task {
             await withCheckedContinuation { continuation in _ = table.add(session: "b", continuation: continuation) }
             other.fulfill()
