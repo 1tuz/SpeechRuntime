@@ -4,15 +4,18 @@ import Darwin
 import Foundation
 import RuntimeUIModel
 
+/// Installed apps must not use SwiftPM's build-directory resource accessor.
+enum AppResources {
+    static func bundle(for app: Bundle = .main) -> Bundle? {
+        guard app.bundleURL.pathExtension == "app" else { return Bundle.module }
+        return app.resourceURL.flatMap {
+            Bundle(url: $0.appendingPathComponent("SpeechRuntimeMenu_SpeechRuntimeApp.bundle"))
+        }
+    }
+}
+
 private enum Localization {
-    // SwiftPM's generated accessor uses the build path as a fallback. Never depend
-    // on that absolute path in an installed app.
-    static let container: Bundle = {
-        if Bundle.main.bundleURL.pathExtension == "app",
-           let resource = Bundle.main.resourceURL?.appendingPathComponent("SpeechRuntimeMenu_SpeechRuntimeApp.bundle"),
-           let bundle = Bundle(url: resource) { return bundle }
-        return Bundle.module
-    }()
+    static let container: Bundle? = AppResources.bundle(for: .main)
     /// Cached per-language bundle. Rebuilt when "appLanguage" changes so new L() calls
     /// immediately reflect the user's choice. NotificationCenter drives the invalidation.
     private static let lock = NSLock()
@@ -26,16 +29,19 @@ private enum Localization {
         // and the old code silently fell back to the container bundle, which
         // resolves through the process-wide AppleLanguages lookup and ignores
         // the in-app preference. That is why switching language did nothing.
-        if let stringsPath = container.path(forResource: "Localizable", ofType: "strings",
-                                            inDirectory: nil, forLocalization: lproj) {
+        if let stringsPath = container?.path(forResource: "Localizable", ofType: "strings",
+                                             inDirectory: nil, forLocalization: lproj) {
             let lprojPath = (stringsPath as NSString).deletingLastPathComponent
             if let bundle = Bundle(path: lprojPath) {
                 cachedLanguage = language; cachedBundle = bundle
                 return bundle
             }
         }
-        cachedLanguage = language; cachedBundle = container
-        return container
+        // Absent resource bundle: keep localizable lookups live against the
+        // app bundle so L() returns the raw key instead of crashing.
+        let fallback = container ?? Bundle.main
+        cachedLanguage = language; cachedBundle = fallback
+        return fallback
     }
     private static var preferredLanguages: [String] {
         // "system" means follow the OS, not an AppleLanguages override that a user

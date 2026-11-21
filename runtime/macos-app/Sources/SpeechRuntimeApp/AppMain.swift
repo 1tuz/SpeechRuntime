@@ -7,11 +7,34 @@ import SwiftUI
 @MainActor
 struct SpeechRuntimeApplication {
     static func main() {
+        if CommandLine.arguments.contains("--check-packaged-resources") {
+            checkPackagedResourcesAndExit()
+        }
         let application = NSApplication.shared
         let delegate = MenuApplicationDelegate()
         application.setActivationPolicy(.accessory)
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
+    }
+
+    private static func checkPackagedResourcesAndExit() -> Never {
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              let resources = AppResources.bundle(),
+              let icon = resources.image(forResource: "MenuBarIcon"), icon.isValid else {
+            fputs("Packaged menu icon is unavailable.\n", stderr)
+            exit(1)
+        }
+        for language in ["en", "ru"] {
+            guard let table = resources.url(forResource: "Localizable", withExtension: "strings",
+                                            subdirectory: nil, localization: language),
+                  let bundle = Bundle(url: table.deletingLastPathComponent()),
+                  bundle.localizedString(forKey: "menu.openPanel", value: nil, table: nil) != "menu.openPanel" else {
+                fputs("Packaged localization is unavailable: \(language).\n", stderr)
+                exit(1)
+            }
+        }
+        print("Packaged resources OK.")
+        exit(0)
     }
 }
 
@@ -120,7 +143,7 @@ final class MenuApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverD
     @objc private func quitOnlyUI() { model.quitUI() }
     private func updateIcon() {
         // Template PNG glyph recolored by macOS to match menu-bar appearance.
-        var image = Bundle.module.image(forResource: "MenuBarIcon")
+        var image = AppResources.bundle()?.image(forResource: "MenuBarIcon")
         if image == nil { image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil) }
         image?.isTemplate = true
         if let image {

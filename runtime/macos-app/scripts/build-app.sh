@@ -47,6 +47,9 @@ done
 sign_one "$APP"
 codesign --verify --deep --strict "$APP"
 
+# Check the signed app's resource lookup before packaging it.
+"$APP/Contents/MacOS/SpeechRuntimeApp" --check-packaged-resources
+
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/speech-runtime-dmg.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 ditto "$APP" "$STAGE/Speech Runtime.app"
